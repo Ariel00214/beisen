@@ -1912,7 +1912,9 @@ function resolveVotes(
   ) {
 
     const candidates =
-      [...slot.values.entries()]
+      [
+        ...slot.values.entries()
+      ]
         .map(
           ([time, value]) => {
 
@@ -1924,10 +1926,6 @@ function resolveVotes(
                 :
                   0;
 
-            /*
-             * 票数是最重要的，
-             * confidence作为第二依据。
-             */
             const score =
               value.count * 1000 +
               avgConfidence * 5 +
@@ -1956,27 +1954,45 @@ function resolveVotes(
     const best =
       candidates[0];
 
+    const second =
+      candidates[1] || null;
+
     /*
-     * 静态图片只有一个画面，
-     * 无法要求多帧。
-     *
-     * 因此：
-     *
+     * 如果同一个视觉槽位出现两个互相竞争的OCR结果，
+     * 票数相同且置信度非常接近，则不猜。
+     */
+    const ambiguous =
+      second &&
+      best.count ===
+        second.count &&
+      Math.abs(
+        best.avgConfidence -
+        second.avgConfidence
+      ) < 7;
+
+    if (ambiguous) {
+      continue;
+    }
+
+    /*
      * 图片：
-     * 置信度 >= 55即可进入结果
+     * 单帧只能依靠结构综合置信度。
      *
      * 视频：
-     * 多帧出现优先；
-     * 如果只有一次，也要求较高confidence。
+     * 优先要求多帧一致；
+     * 单帧只有极高置信度时才接受。
      */
     const accepted =
       isSingleImage
         ?
-          best.bestConfidence >= 55
+          best.bestConfidence >= 62
         :
           (
-            best.count >= 2 ||
-            best.bestConfidence >= 82
+            (
+              best.count >= 2 &&
+              best.avgConfidence >= 66
+            ) ||
+            best.bestConfidence >= 90
           );
 
     if (!accepted) {
@@ -1999,23 +2015,16 @@ function resolveVotes(
   }
 
   /*
-   * 如果多个slot最终得到完全一样的日期+时间，
-   * 只保留一份。
+   * 这里只去掉“日期 + 时间完全相同”的重复识别。
    *
-   * 注意：
-   *
-   * 这里不是把14:30和14:31合并。
-   *
-   * 只有完全一样：
-   *
-   * 14:30 == 14:30
-   *
-   * 才去除重复。
+   * 14:30 和 14:31 不会被合并。
    */
   const exact =
     new Map();
 
-  for (const item of resolved) {
+  for (
+    const item of resolved
+  ) {
 
     const key =
       fmtDT(
@@ -2028,7 +2037,7 @@ function resolveVotes(
     if (
       !old ||
       item.count >
-      old.count ||
+        old.count ||
       (
         item.count ===
           old.count &&
@@ -2044,7 +2053,9 @@ function resolveVotes(
     }
   }
 
-  return [...exact.values()];
+  return [
+    ...exact.values()
+  ];
 }
 
 /* =========================================================
