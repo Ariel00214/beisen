@@ -733,14 +733,11 @@ function spatialCandidates(
     +selected[1];
 
   /*
-   * 如果画面上明确识别到年月，
-   * 可以使用画面年月。
-   *
-   * 如果没有，
-   * 使用用户上方手动选择的记录年月。
+   * 页面若明确识别到年月则采用页面年月；
+   * 否则使用用户选择的记录年月。
    */
   const ym =
-    (data.text || '')
+    String(data.text || '')
       .match(
         /(20\d{2})\s*年?\s*[-/.]?\s*(\d{1,2})\s*月/
       );
@@ -760,93 +757,118 @@ function spatialCandidates(
   }
 
   /*
-   * 左侧日期数字。
+   * =========================================================
+   * STEP 1
+   * 找左侧“日期数字”
    *
    * 例如：
    *
    * 周三
    * 02
+   *
+   * 这里只接受靠左的1～31数字。
+   * =========================================================
    */
-  const anchors = words
-    .map(word => {
 
-      const text =
-        String(word.text || '')
-          .trim();
+  const anchors =
+    words
+      .map(word => {
 
-      if (
-        !/^\d{1,2}$/.test(text)
-      ) {
-        return null;
-      }
+        const text =
+          String(word.text || '')
+            .trim();
 
-      const day =
-        +text;
+        if (
+          !/^\d{1,2}$/.test(text)
+        ) {
+          return null;
+        }
 
-      if (
-        day < 1 ||
-        day > 31
-      ) {
-        return null;
-      }
+        const day =
+          +text;
 
-      const box =
-        word.bbox;
+        if (
+          day < 1 ||
+          day > 31
+        ) {
+          return null;
+        }
 
-      if (!box) {
-        return null;
-      }
+        const box =
+          word.bbox;
 
-      /*
-       * 日期只应该出现在画面非常靠左的位置。
-       */
-      if (
-        box.x0 >
-        width * 0.24
-      ) {
-        return null;
-      }
+        if (!box) {
+          return null;
+        }
 
-      return {
-        day,
-        y:
-          (box.y0 + box.y1) / 2,
+        /*
+         * 日期数字必须位于左侧。
+         * 避免地点、时间中的数字被当成日期。
+         */
+        if (
+          box.x0 >
+          width * 0.24
+        ) {
+          return null;
+        }
 
-        confidence:
-          Number(
-            word.confidence || 0
-          )
-      };
-    })
-    .filter(Boolean)
-    .sort(
-      (a, b) =>
-        a.y - b.y
-    );
+        return {
+          day,
+
+          y:
+            (
+              box.y0 +
+              box.y1
+            ) / 2,
+
+          confidence:
+            clamp(
+              Number(
+                word.confidence || 0
+              ),
+              0,
+              100
+            )
+        };
+      })
+      .filter(Boolean)
+      .sort(
+        (a, b) =>
+          a.y - b.y
+      );
 
   if (!anchors.length) {
     return [];
   }
 
   /*
-   * 识别排班标题所在行，
-   * 防止把：
+   * =========================================================
+   * STEP 2
+   * 找“13:00 - 22:00 固定班次”所在行
    *
-   * 13:00 - 22:00 固定班次
+   * 这次不只是把它排除。
    *
-   * 错当成真实签到。
+   * 它现在是非常重要的 Day Block 边界。
+   *
+   * 即使下一天日期OCR漏掉，
+   * 只要下一条固定班次出现，
+   * 上一天Block必须立即结束。
+   * =========================================================
    */
-  const scheduleLineYs = [];
+
+  const scheduleRows = [];
 
   for (const line of lines) {
 
     const lineText =
-      String(
-        line.text || ''
-      )
+      String(line.text || '')
         .replace(
           /：/g,
           ':'
+        )
+        .replace(
+          /\s+/g,
+          ' '
         );
 
     const times =
@@ -854,40 +876,350 @@ function spatialCandidates(
         /\d{1,2}\s*:\s*\d{2}/g
       ) || [];
 
-    if (
+    const isSchedule =
       /固定班次|班次/.test(
         lineText
       ) ||
-      times.length >= 2
-    ) {
+      (
+        times.length >= 2 &&
+        /13\s*:\s*00/.test(lineText) &&
+        /22\s*:\s*00/.test(lineText)
+      );
 
-      const ys =
-        (line.words || [])
-          .map(
-            w =>
-              w.bbox
-                ? w.bbox.y0
-                : null
-          )
-          .filter(
-            Number.isFinite
-          );
+    if (!isSchedule) {
+      continue;
+    }
 
-      if (ys.length) {
-        scheduleLineYs.push(
-          Math.min(...ys)
+    const lineWords =
+      Array.isArray(line.words)
+        ? line.words
+        : [];
+
+    const boxes =
+      lineWords
+        .map(w => w.bbox)
+        .filter(Boolean);
+
+    if (!boxes.length) {
+      continue;
+    }
+
+    const y0 =
+      Math.min(
+        ...boxes.map(
+          b => b.y0
+        )
+      );
+
+    const y1 =
+      Math.max(
+        ...boxes.map(
+          b => b.y1
+        )
+      );
+
+    const confidences =
+      lineWords
+        .map(
+          w =>
+            Number(
+              w.confidence || 0
+            )
+        )
+        .filter(
+          Number.isFinite
         );
-      }
+
+    const confidence =
+      confidences.length
+        ?
+          confidences.reduce(
+            (a, b) =>
+              a + b,
+            0
+          ) /
+          confidences.length
+        :
+          70;
+
+    scheduleRows.push({
+      y:
+        (y0 + y1) / 2,
+
+      y0,
+      y1,
+
+      confidence:
+        clamp(
+          confidence,
+          0,
+          100
+        )
+    });
+  }
+
+  scheduleRows.sort(
+    (a, b) =>
+      a.y - b.y
+  );
+
+  if (!scheduleRows.length) {
+    /*
+     * 安全原则：
+     *
+     * 没有识别出固定班次结构，
+     * 就不强行把下面的时间归给某一天。
+     *
+     * 宁可让用户补卡，
+     * 也不能产生跨日串卡。
+     */
+    return [];
+  }
+
+  /*
+   * =========================================================
+   * STEP 3
+   * 日期必须和自己的“固定班次”匹配成功，
+   * 才能创建 Day Block。
+   * =========================================================
+   */
+
+  const blocks = [];
+
+  for (const anchor of anchors) {
+
+    /*
+     * 北森页面里日期和固定班次基本处于同一水平区域。
+     *
+     * 允许固定班次略高于或略低于日期中心。
+     */
+    const possibleSchedules =
+      scheduleRows
+        .filter(
+          row =>
+            row.y >=
+              anchor.y -
+              height * 0.045 &&
+            row.y <=
+              anchor.y +
+              height * 0.095
+        )
+        .sort(
+          (a, b) =>
+            Math.abs(
+              a.y -
+              anchor.y
+            ) -
+            Math.abs(
+              b.y -
+              anchor.y
+            )
+        );
+
+    const schedule =
+      possibleSchedules[0];
+
+    /*
+     * 日期没有自己的固定班次证据：
+     * 不创建这个Day Block。
+     */
+    if (!schedule) {
+      continue;
+    }
+
+    /*
+     * 日期本身置信度太差时也不强行使用。
+     */
+    if (
+      anchor.confidence <
+      30
+    ) {
+      continue;
+    }
+
+    blocks.push({
+      day:
+        anchor.day,
+
+      anchorY:
+        anchor.y,
+
+      scheduleY:
+        schedule.y,
+
+      scheduleBottom:
+        schedule.y1,
+
+      anchorConfidence:
+        anchor.confidence,
+
+      scheduleConfidence:
+        schedule.confidence
+    });
+  }
+
+  /*
+   * 相同日期 + 相同固定班次可能因为OCR产生重复，
+   * 去掉结构重复。
+   */
+  const blockMap =
+    new Map();
+
+  for (const block of blocks) {
+
+    const bucket =
+      Math.round(
+        block.scheduleY /
+        Math.max(
+          1,
+          height * 0.025
+        )
+      );
+
+    const key =
+      `${block.day}|${bucket}`;
+
+    const previous =
+      blockMap.get(key);
+
+    const score =
+      block.anchorConfidence +
+      block.scheduleConfidence;
+
+    const oldScore =
+      previous
+        ?
+          previous.anchorConfidence +
+          previous.scheduleConfidence
+        :
+          -1;
+
+    if (
+      !previous ||
+      score >
+      oldScore
+    ) {
+      blockMap.set(
+        key,
+        block
+      );
     }
   }
 
-  const raw = [];
+  const confirmedBlocks =
+    [...blockMap.values()]
+      .sort(
+        (a, b) =>
+          a.scheduleY -
+          b.scheduleY
+      );
+
+  if (!confirmedBlocks.length) {
+    return [];
+  }
 
   /*
-   * 时间仍然优先按 word 级别解析。
+   * =========================================================
+   * STEP 4
+   * 建立Block结束边界。
    *
-   * 只允许明确 HH:mm 格式。
+   * 这里是解决“前一天时间跑到下一天”的关键。
+   *
+   * 边界不仅包含成功匹配的下一天日期，
+   * 还包含所有识别到的固定班次。
+   *
+   * 所以：
+   *
+   * 日期03
+   * 固定班次
+   * 14:41
+   *
+   * 下一天日期02漏OCR
+   * 但出现新的固定班次
+   *
+   * ↓
+   *
+   * 03的Block依然会立即结束。
+   * =========================================================
    */
+
+  for (
+    let i = 0;
+    i < confirmedBlocks.length;
+    i++
+  ) {
+
+    const block =
+      confirmedBlocks[i];
+
+    const futureSchedule =
+      scheduleRows.find(
+        row =>
+          row.y >
+          block.scheduleY +
+          height * 0.045
+      );
+
+    const futureAnchor =
+      anchors.find(
+        anchor =>
+          anchor.y >
+          block.anchorY +
+          height * 0.055
+      );
+
+    const boundaries =
+      [];
+
+    if (futureSchedule) {
+      boundaries.push(
+        futureSchedule.y0
+      );
+    }
+
+    if (futureAnchor) {
+      boundaries.push(
+        futureAnchor.y
+      );
+    }
+
+    /*
+     * 一个日Block不允许无限向下延伸。
+     *
+     * 即使后面的日期和固定班次都OCR失败，
+     * 当前日期也只能拥有有限的垂直范围。
+     */
+    boundaries.push(
+      block.scheduleY +
+      height * 0.235
+    );
+
+    boundaries.push(
+      height
+    );
+
+    block.endY =
+      Math.min(
+        ...boundaries
+      );
+
+    /*
+     * 时间必须在固定班次下面。
+     */
+    block.startY =
+      block.scheduleBottom +
+      height * 0.008;
+  }
+
+  /*
+   * =========================================================
+   * STEP 5
+   * 读取真正打卡时间
+   * =========================================================
+   */
+
+  const raw = [];
+
   for (const word of words) {
 
     const text =
@@ -903,7 +1235,7 @@ function spatialCandidates(
         );
 
     /*
-     * 尽量只允许完整时间。
+     * 必须是完整 HH:mm。
      */
     const match =
       text.match(
@@ -937,85 +1269,75 @@ function spatialCandidates(
     }
 
     const x =
-      (box.x0 + box.x1) / 2;
+      (
+        box.x0 +
+        box.x1
+      ) / 2;
 
     const y =
-      (box.y0 + box.y1) / 2;
+      (
+        box.y0 +
+        box.y1
+      ) / 2;
 
     /*
-     * 打卡时间位于日期右侧，
-     * 但不会位于非常靠右的区域。
+     * 真正打卡时间只能位于这个水平范围。
+     *
+     * 状态栏时间已经被ROI裁掉，
+     * 右侧GPS、地点等也不会进入。
      */
     if (
-      x < width * 0.13 ||
-      x > width * 0.78
+      x <
+        width * 0.13 ||
+      x >
+        width * 0.80
     ) {
       continue;
     }
 
     /*
-     * 排除固定班次所在行。
+     * 找真正包含这个时间的Day Block。
+     *
+     * 不是“向上找最近日期”。
      */
-    const onScheduleLine =
-      scheduleLineYs.some(
-        scheduleY =>
+    const block =
+      confirmedBlocks.find(
+        candidate =>
+          y >=
+            candidate.startY &&
+          y <
+            candidate.endY -
+            height * 0.006
+      );
+
+    if (!block) {
+      /*
+       * 日期归属不明确：
+       *
+       * 直接舍弃。
+       *
+       * 绝不借给前一天或后一天。
+       */
+      continue;
+    }
+
+    /*
+     * 再额外检查：
+     *
+     * 这个时间不能和固定班次标题太接近，
+     * 防止13:00 / 22:00被误当实际签到。
+     */
+    const nearAnySchedule =
+      scheduleRows.some(
+        schedule =>
           Math.abs(
-            scheduleY - y
+            schedule.y -
+            y
           ) <
-          height * 0.018
+          height * 0.022
       );
 
-    if (onScheduleLine) {
-      continue;
-    }
-
-    /*
-     * 找离当前时间最近的上方日期。
-     */
-    const possibleAnchors =
-      anchors.filter(
-        anchor =>
-          anchor.y <=
-          y + height * 0.025
-      );
-
-    const anchor =
-      possibleAnchors.at(-1);
-
-    if (!anchor) {
-      continue;
-    }
-
-    /*
-     * 如果时间和日期垂直距离过远，
-     * 不强行配对。
-     */
-    const distance =
-      y - anchor.y;
-
-    if (
-      distance <
-      -height * 0.04 ||
-      distance >
-      height * 0.34
-    ) {
-      continue;
-    }
-
-    /*
-     * 如果日期和时间之间出现了另一个日期，
-     * 当前时间应该属于后面的日期。
-     */
-    const nextAnchor =
-      anchors.find(
-        a =>
-          a.y >
-          anchor.y &&
-          a.y <
-          y - height * 0.01
-      );
-
-    if (nextAnchor) {
+    if (nearAnySchedule) {
       continue;
     }
 
@@ -1023,74 +1345,100 @@ function spatialCandidates(
       new Date(
         year,
         month - 1,
-        anchor.day,
+        block.day,
         hour,
         minute
       );
 
-    /*
-     * JS Date 自动进位，因此再次检查真实年月日。
-     */
     if (
-      date.getFullYear() !== year ||
-      date.getMonth() !== month - 1 ||
-      date.getDate() !== anchor.day
+      date.getFullYear() !==
+        year ||
+      date.getMonth() !==
+        month - 1 ||
+      date.getDate() !==
+        block.day
     ) {
       continue;
     }
 
     /*
-     * 视觉位置槽位。
+     * =====================================================
+     * 结构置信度
      *
-     * 同一天：
+     * OCR数字本身 + 日期 + 固定班次三者共同决定。
      *
-     * 22:13
+     * 不允许仅凭一个高confidence时间，
+     * 在日期结构不可靠时直接通过。
+     * =====================================================
+     */
+
+    const timeConfidence =
+      clamp(
+        Number(
+          word.confidence || 0
+        ),
+        0,
+        100
+      );
+
+    const structuralConfidence =
+      clamp(
+        timeConfidence * 0.65 +
+        block.anchorConfidence * 0.20 +
+        block.scheduleConfidence * 0.15,
+        0,
+        100
+      );
+
+    /*
+     * 以“固定班次”为参考点计算视觉槽位。
      *
-     * 14:30
+     * 相比之前以日期为参考更加稳定。
      *
-     * 是两条不同记录，
-     * 它们位于不同垂直位置。
+     * 0.022的桶宽足够区分页面里的多次真实签到。
      *
-     * 因此不能因为两个时间接近就合并。
-     *
-     * offsetBucket 只用于判断：
-     *
-     * “视频不同帧里的同一条视觉记录”
-     *
-     * 并不是判断两个真实时间是否重复。
+     * 14:30 和 14:31 如果页面本来就有两行，
+     * 会保留成两个独立记录。
      */
     const offset =
       (
         y -
-        anchor.y
+        block.scheduleY
       ) /
       height;
 
     const offsetBucket =
       Math.round(
-        offset / 0.035
+        offset /
+        0.022
       );
 
     raw.push({
       date,
 
       day:
-        anchor.day,
+        block.day,
 
       time:
         `${pad(hour)}:${pad(minute)}`,
 
       confidence:
-        clamp(
-          Number(
-            word.confidence || 0
-          ),
-          0,
-          100
-        ),
+        structuralConfidence,
+
+      rawTimeConfidence:
+        timeConfidence,
+
+      anchorConfidence:
+        block.anchorConfidence,
+
+      scheduleConfidence:
+        block.scheduleConfidence,
 
       anchorY:
-        anchor.y,
+        block.anchorY,
+
+      scheduleY:
+        block.scheduleY,
 
       timeY:
         y,
@@ -1100,14 +1448,19 @@ function spatialCandidates(
   }
 
   /*
-   * 同一个 OCR pass 内：
+   * =========================================================
+   * STEP 6
+   * 同一个OCR pass内只去掉“完全相同视觉记录”。
    *
-   * 同一天
-   * 同一个视觉槽位
-   * 同一个时间
+   * 绝对不能合并：
    *
-   * 只留置信度最高的一次。
+   * 14:30
+   * 14:31
+   *
+   * 即使它们只差1分钟。
+   * =========================================================
    */
+
   const merged =
     new Map();
 
@@ -1122,8 +1475,9 @@ function spatialCandidates(
     if (
       !old ||
       item.confidence >
-      old.confidence
+        old.confidence
     ) {
+
       merged.set(
         key,
         item
@@ -1131,7 +1485,9 @@ function spatialCandidates(
     }
   }
 
-  return [...merged.values()];
+  return [
+    ...merged.values()
+  ];
 }
 
 /* =========================================================
