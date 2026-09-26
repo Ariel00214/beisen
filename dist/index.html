@@ -1556,9 +1556,9 @@ async function ocrFrame(
    * 快很多。
    */
   const needSecondPass =
-    options.forceSecondPass ||
-    candidates.length === 0 ||
-    averageConfidence < 78;
+  options.forceSecondPass ||
+  candidates.length === 0 ||
+  averageConfidence < 72;
 
   if (needSecondPass) {
 
