@@ -1,7 +1,7 @@
 <!doctype html>
 <html lang="zh-CN"><head><meta charset="UTF-8"><meta name="viewport" content="width=device-width,initial-scale=1">
 <title>北森工时核算</title><meta name="description" content="本地识别飞书北森打卡截图与视频，自动核算跨天工作时长。">
-<script src="./ocr/tesseract.min.js"></script>
+<!-- OCR is loaded only when a file is selected; it must never block the first paint. -->
 <style>
 :root{--ink:#172033;--muted:#697386;--paper:#f3f6fb;--card:#fff;--line:#dce3ee;--blue:#315bea;--blue2:#6f8cff;--green:#167a58;--amber:#a45c08;--red:#c43b3b;--shadow:0 16px 45px rgba(36,52,86,.10)}*{box-sizing:border-box}body{margin:0;background:var(--paper);color:var(--ink);font-family:Inter,"PingFang SC","Microsoft YaHei",sans-serif;font-size:16px;line-height:1.55}.shell{max-width:1180px;margin:auto;padding:34px 22px 72px}header{display:flex;justify-content:space-between;align-items:flex-end;gap:24px;margin-bottom:24px}.brand h1{margin:0;font-size:clamp(28px,4vw,44px);letter-spacing:-.04em}.brand p{margin:5px 0 0;color:var(--muted)}.rule{background:#e9efff;color:#2446b5;border:1px solid #ced9ff;padding:10px 14px;border-radius:999px;font-size:14px;white-space:nowrap}.panel{background:var(--card);border:1px solid var(--line);border-radius:22px;box-shadow:var(--shadow);padding:24px;margin-bottom:18px}.upload{border:1.5px dashed #a9b8d5;background:#f8faff;border-radius:16px;min-height:190px;display:grid;place-items:center;text-align:center;padding:22px;transition:.2s}.upload.drag{border-color:var(--blue);background:#eef2ff}.upload strong{display:block;font-size:19px;margin:10px}.upload small{color:var(--muted);display:block}.actions{display:flex;gap:10px;justify-content:center;flex-wrap:wrap;margin-top:18px}.btn{border:0;border-radius:11px;padding:11px 18px;font:inherit;font-weight:650;cursor:pointer;background:var(--blue);color:white}.btn.secondary{background:#edf1f8;color:#344054}.btn:disabled{opacity:.45;cursor:not-allowed}input[type=file]{display:none}.progress{height:8px;background:#edf0f5;border-radius:9px;overflow:hidden;margin:18px 0 4px}.progress i{display:block;width:0;height:100%;background:linear-gradient(90deg,var(--blue),var(--blue2));transition:.3s}.status{color:var(--muted);font-size:14px}.hidden{display:none!important}.checks{display:grid;grid-template-columns:repeat(3,1fr);gap:12px;margin-top:18px}.check{border:1px solid var(--line);border-radius:13px;padding:14px}.check b{display:block;margin-bottom:3px}.ok{color:var(--green)}.warn{color:var(--amber)}.manual{width:100%;min-height:100px;border:1px solid var(--line);border-radius:12px;padding:12px;font:inherit;resize:vertical}.manual:focus{outline:2px solid #b6c5ff;border-color:var(--blue)}.summary{display:grid;grid-template-columns:repeat(4,1fr);gap:12px;margin-bottom:18px}.metric{background:var(--card);border:1px solid var(--line);padding:18px;border-radius:16px}.metric span{display:block;color:var(--muted);font-size:14px}.metric strong{font-size:25px}.tablewrap{overflow-x:auto;border:1px solid var(--line);border-radius:15px}table{width:100%;border-collapse:collapse;min-width:820px}th,td{text-align:left;padding:13px 14px;border-bottom:1px solid var(--line)}th{font-size:13px;text-transform:none;color:var(--muted);background:#f8fafc}tr:last-child td{border-bottom:0}td input{width:152px;border:1px solid #cbd5e1;border-radius:8px;padding:8px;font:inherit;font-size:14px}.tag{font-size:12px;border-radius:99px;padding:4px 8px;background:#edf8f3;color:var(--green)}.error-tag{background:#fff1f0;color:var(--red)}.foot{display:flex;justify-content:space-between;gap:18px;color:var(--muted);font-size:13px;margin-top:14px}.empty{text-align:center;color:var(--muted);padding:44px}.sectiontitle{display:flex;justify-content:space-between;align-items:center;margin-bottom:14px}.sectiontitle h2{font-size:20px;margin:0}.icon{width:42px;height:42px;border-radius:12px;background:#e8edff;display:grid;place-items:center;color:var(--blue);font-size:21px}
 @media(max-width:760px){.shell{padding:22px 14px 50px}header{display:block}.rule{display:inline-block;margin-top:13px}.panel{padding:16px;border-radius:17px}.checks,.summary{grid-template-columns:1fr 1fr}.foot{display:block}.metric strong{font-size:21px}}@media(max-width:430px){.checks,.summary{grid-template-columns:1fr}.upload{min-height:180px}}
@@ -462,11 +462,42 @@ function openEditor(i, side) {
 $('#record-month').value =
   fmtDate(new Date()).slice(0, 7);
 
+let ocrScriptPromise = null;
+
+function loadOcrScript() {
+  if (window.Tesseract) return Promise.resolve();
+  if (ocrScriptPromise) return ocrScriptPromise;
+
+  ocrScriptPromise = new Promise((resolve, reject) => {
+    const script = document.createElement('script');
+    script.src = './ocr/tesseract.min.js';
+    script.async = true;
+    const finish = error => {
+      clearTimeout(timer);
+      script.onload = script.onerror = null;
+      if (error) {
+        script.remove();
+        ocrScriptPromise = null;
+        reject(error);
+      } else {
+        resolve();
+      }
+    };
+    const timer = setTimeout(() => finish(new Error('识别组件加载超时，请检查网络后重新选择文件；也可先使用下方文字解析')), 25000);
+    script.onload = () => finish(window.Tesseract ? null : new Error('识别组件未能启动，请重新选择文件'));
+    script.onerror = () => finish(new Error('识别组件加载失败，请检查网络后重新选择文件；文字解析仍可使用'));
+    document.head.appendChild(script);
+  });
+  return ocrScriptPromise;
+}
+
 let ocrWorker = null;
 
 let scanGeneration = 0;
 
 async function worker() {
+
+  await loadOcrScript();
 
   if (!ocrWorker) {
 
